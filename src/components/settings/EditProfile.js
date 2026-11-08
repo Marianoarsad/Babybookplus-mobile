@@ -1,0 +1,311 @@
+import React, { useState, useEffect, useMemo } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, Animated, Platform } from "react-native";
+import { SettingsCard, selectionStyle } from "./SettingsControls";
+import { api } from "../../utils/api";
+import { useToast } from "../ui/Toast";
+import { SkeletonBlock } from "../ui/Skeleton";
+import KeyboardAvoider from "../ui/KeyboardAvoider";
+import Avatar from "../ui/Avatar";
+import { useTheme } from "../../context/ThemeContext";
+import { useScreenPadBottom, useScreenPadTop } from "../../utils/responsive";
+import { useScroll } from "../../context/ScrollContext";
+import { RELATIONSHIPS, relationshipLabel } from "../../utils/relationship";
+import { space, radius, type, MIN_TOUCH } from "../../theme";
+import numericInput from "../../utils/numericInput.cjs";
+import Field from "../ui/Field";
+import Button from "../ui/Button";
+import ProfileSettingsIcon from "./ProfileSettingsIcon";
+
+const { digitsOnly } = numericInput;
+
+// Guardian account fields (name, contact, relationship, city, avatar).
+// Language/theme and logout live in the Profile hub.
+//
+// Two things this screen used to get wrong, both fixed here:
+//
+// 1. The Email box was editable, and saving it did nothing. handleSaveInfo sent
+//    fullName/phoneNumber/gender/avatarUrl and PUT /me did not accept an email
+//    at all, so the parent edited the field, was told "Profile settings updated
+//    successfully!", and the old address came back on the next load. Email is
+//    now its own block with its own control, because it is the login identity
+//    and its save can fail on the server's terms (wrong password, address
+//    already taken) in a way none of the other fields can.
+//
+// 2. "Home City / Region" wrote to localStorage under bb_parent_city and was
+//    read back only by this file — it never reached the server, never synced to
+//    a second device, and pre-filled "Quezon City, NCR" for every parent alive.
+//    It is a real column now, and it starts blank.
+//
+// The four PREDEFINED_AVATARS (Unsplash photographs of strangers, one of them
+// the default) are gone; ui/Avatar.js shows the parent's own initials instead.
+export default function EditProfile({
+    parentName,
+    onUpdateParentName,
+    parentAvatar,
+    parentRelationship,
+    onUpdateParentRelationship,
+}) {
+    const { colors } = useTheme();
+    const styles = useMemo(() => makeStyles(colors), [colors]);
+    const padBottom = useScreenPadBottom();
+    const padTop = useScreenPadTop();
+
+    const { scrollProps } = useScroll();
+    const toast = useToast();
+
+    const [email, setEmail] = useState("");
+    const [phone, setPhone] = useState("");
+    const [nameDraft, setNameDraft] = useState(parentName || "");
+    const [relationshipDraft, setRelationshipDraft] = useState(parentRelationship || "");
+    const [city, setCity] = useState("");
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+
+    // Sign-in email, kept apart from the fields above on purpose (see header).
+    const [newEmail, setNewEmail] = useState("");
+    const [emailPassword, setEmailPassword] = useState("");
+    const [emailError, setEmailError] = useState("");
+    const [emailSaving, setEmailSaving] = useState(false);
+
+    useEffect(() => {
+        (async () => {
+            setLoading(true);
+            try {
+                const { user } = await api.me();
+                if (user) {
+                    setEmail(user.email || "");
+                    setPhone(digitsOnly(user.phoneNumber));
+                    setCity(user.city || "");
+                }
+            } catch (e) {
+                console.log("load profile:", e.message);
+            } finally {
+                setLoading(false);
+            }
+        })();
+    }, []);
+
+    const handleSaveInfo = async () => {
+        if (saving) return;
+        if (!nameDraft.trim()) {
+            toast.error("Name cannot be empty.");
+            return;
+        }
+        setSaving(true);
+        try {
+            // Every value this call sends is a value the server stores. The old
+            // version also passed a city that went nowhere and an email the
+            // endpoint ignored, then reported success for both.
+            const { user } = await api.updateMe({
+                fullName: nameDraft.trim(),
+                phoneNumber: digitsOnly(phone),
+                relationship: relationshipDraft,
+                city,
+            });
+            // Read the saved row back instead of trusting local state, so a
+            // field the server rejected or normalised shows what was actually
+            // stored.
+            if (user) {
+                onUpdateParentName?.(user.fullName || nameDraft.trim());
+                setPhone(digitsOnly(user.phoneNumber));
+                setCity(user.city || "");
+                if (onUpdateParentRelationship) onUpdateParentRelationship(user.relationship || "");
+            }
+            toast.success("Profile updated");
+        } catch (e) {
+            toast.error(e.message || "Could not update profile");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleChangeEmail = async () => {
+        const next = newEmail.trim();
+        if (!next) return setEmailError("Enter the new email address");
+        if (next.toLowerCase() === email.toLowerCase()) return setEmailError("That is already your email address");
+        if (!emailPassword) return setEmailError("Enter your current password to confirm");
+        setEmailError("");
+        setEmailSaving(true);
+        try {
+            const { user } = await api.changeEmail({ newEmail: next, currentPassword: emailPassword });
+            setEmail(user.email || next);
+            setNewEmail("");
+            setEmailPassword("");
+            toast.success("Sign-in email updated");
+        } catch (e) {
+            setEmailError(e.message || "Could not change the email address");
+        } finally {
+            setEmailSaving(false);
+        }
+    };
+
+    return (
+        <KeyboardAvoider>
+        <Animated.ScrollView
+            style={styles.container}
+            contentContainerStyle={[styles.content, { paddingTop: padTop, paddingBottom: padBottom }]}
+            keyboardShouldPersistTaps="handled"
+            {...scrollProps}
+        >
+            <View style={styles.headerBox}>
+                <View style={{ borderRadius: 52, boxShadow: colors.profileSettings.avatarShadow }}>
+                    <Avatar uri={parentAvatar} name={parentName} size={104} borderWidth={3} initialsColor={colors.profileSettings.accent} />
+                </View>
+                <Text style={styles.parentNameText}>{parentName}</Text>
+                <Text style={styles.parentRoleText}>
+                    {relationshipLabel(parentRelationship)
+                        ? `Primary Guardian · ${relationshipLabel(parentRelationship)}`
+                        : "Primary Guardian"}
+                </Text>
+            </View>
+
+            <SettingsCard icon={<ProfileSettingsIcon kind="person" size={40} />} title="Guardian Information" subtitle="Keep your contact details up to date">
+                {loading ? (
+                    <>
+                        {[0, 1, 2, 3].map((i) => (
+                            <View key={i} style={styles.formGroup}>
+                                <SkeletonBlock width={i % 2 ? "38%" : "46%"} height={12} radius={6} />
+                                <SkeletonBlock width="100%" height={44} radius={radius.md} style={{ marginTop: space.xs }} />
+                            </View>
+                        ))}
+                    </>
+                ) : (
+                    <>
+                        <Field appearance="settings" borderRadius={radius.pill}
+                                label="Full Name"
+                                value={nameDraft}
+                                onChangeText={setNameDraft}
+                                autoComplete="name"
+                                textContentType="name"
+                            />
+
+                        {/* The same five chips the Create an Account form uses,
+                            from the same list, so the two screens cannot offer
+                            different answers to one question. */}
+                        <View style={styles.formGroup}>
+                            <Text style={styles.label}>I am the child's…</Text>
+                            <View style={styles.chipWrap}>
+                                {RELATIONSHIPS.map((opt) => {
+                                    const on = relationshipDraft === opt.key;
+                                    return (
+                                        <TouchableOpacity
+                                            key={opt.key}
+                                            onPress={() =>
+                                                setRelationshipDraft(opt.key)
+                                            }
+                                            accessibilityRole="radio"
+                                            accessibilityState={{ selected: on, checked: on }}
+                                            {...(Platform.OS === "web" ? { "aria-checked": on } : {})}
+                                            accessibilityLabel={opt.label}
+                                            style={[styles.chip, selectionStyle(colors, on)]}
+                                        >
+                                            <Text style={[styles.chipText, on && styles.chipTextOn]}>{on ? "✓ " : ""}{opt.label}</Text>
+                                        </TouchableOpacity>
+                                    );
+                                })}
+                            </View>
+                        </View>
+
+                        <Field appearance="settings" borderRadius={radius.pill}
+                                label="Phone Number"
+                                keyboardType="phone-pad"
+                                numericMode="digits"
+                                value={phone}
+                                onChangeText={setPhone}
+                                placeholder="09XX XXX XXXX"
+                                autoComplete="tel"
+                                textContentType="telephoneNumber"
+                            />
+                        <Field appearance="settings" borderRadius={radius.pill}
+                                label="City / Municipality"
+                                value={city}
+                                onChangeText={setCity}
+                                placeholder="Where you live"
+                                autoComplete="postal-address-locality"
+                                textContentType="addressCity"
+                            />
+                        <Button variant="settings" title="Save Changes" onPress={handleSaveInfo} loading={saving} />
+                    </>
+                )}
+            </SettingsCard>
+
+            <SettingsCard
+                icon={<ProfileSettingsIcon kind="mail" size={40} />}
+                title="Sign-in Email"
+                subtitle="The address you log in with, and where a password reset is sent"
+            >
+                {loading ? (
+                    <SkeletonBlock width="70%" height={14} radius={6} />
+                ) : (
+                    <>
+                        <View style={styles.currentRow}>
+                            <Text style={styles.currentLabel}>Current</Text>
+                            <Text selectable style={styles.currentValue}>
+                                {email || "Not recorded"}
+                            </Text>
+                        </View>
+                        <Field appearance="settings" borderRadius={radius.pill}
+                                label="New Email Address"
+                                keyboardType="email-address"
+                                autoCapitalize="none"
+                                value={newEmail}
+                                onChangeText={(t) => {
+                                    setNewEmail(t);
+                                    if (emailError) setEmailError("");
+                                }}
+                                placeholder="Enter the new address"
+                                autoComplete="email"
+                                textContentType="username"
+                                error={!!emailError}
+                            />
+                        <Field appearance="settings" borderRadius={radius.pill}
+                                label="Current Password"
+                                secureTextEntry
+                                value={emailPassword}
+                                onChangeText={(t) => {
+                                    setEmailPassword(t);
+                                    if (emailError) setEmailError("");
+                                }}
+                                placeholder="Confirm it's you"
+                                autoComplete="current-password"
+                                textContentType="password"
+                                error={emailError}
+                            />
+                        <Button variant="settings" title="Change Email" onPress={handleChangeEmail} loading={emailSaving} />
+                    </>
+                )}
+            </SettingsCard>
+        </Animated.ScrollView>
+        </KeyboardAvoider>
+    );
+}
+
+const makeStyles = (colors) =>
+    StyleSheet.create({
+        // transparent, not colors.background: App.js paints the page gradient.
+
+        container: { flex: 1, backgroundColor: "transparent" },
+        // Padding on the content so the bottom clearance scrolls with it.
+        content: { padding: space.lg },
+        headerBox: { alignItems: "center", marginVertical: space.lg },
+        parentNameText: { ...type.heading, color: colors.profileSettings.text, marginTop: space.sm },
+        parentRoleText: { ...type.caption, color: colors.profileSettings.muted, marginTop: 2 },
+        formGroup: { marginBottom: space.md },
+        label: { ...type.subheading, color: colors.profileSettings.muted, marginBottom: space.xs },
+        chipWrap: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
+        chip: {
+            minHeight: MIN_TOUCH,
+            justifyContent: "center",
+            paddingHorizontal: space.md,
+            borderRadius: radius.pill,
+            borderCurve: "continuous",
+            borderWidth: 1,
+            borderColor: colors.border,
+            backgroundColor: colors.surfaceAlt,
+        },
+        chipText: { ...type.caption, color: colors.profileSettings.muted },
+        chipTextOn: { fontWeight: "700", color: colors.profileSettings.accent },
+        currentRow: { gap: 4, padding: 12, backgroundColor: colors.profileSettings.inset, borderRadius: 16, marginBottom: space.md },
+        currentLabel: { ...type.subheading, color: colors.profileSettings.muted },
+        currentValue: { ...type.body, color: colors.profileSettings.text, flexShrink: 1 },
+    });

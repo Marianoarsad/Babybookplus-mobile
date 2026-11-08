@@ -1,0 +1,110 @@
+import React from "react";
+import { Platform, Text, Pressable, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { authMaterial as p, radius, space, shadow, type, MIN_TOUCH } from "../../theme";
+import Gradient from "./Gradient";
+import { useTheme } from "../../context/ThemeContext";
+import PulseLoader from "./PulseLoader";
+
+// Optional haptics (guarded so it's a no-op if expo-haptics isn't installed).
+let Haptics = null;
+try {
+    // eslint-disable-next-line global-require
+    Haptics = require("expo-haptics");
+} catch (e) {
+    Haptics = null;
+}
+
+const makeVariants = (colors) => ({
+    primary: { bg: colors.primary, fg: colors.onPrimary, border: "transparent", elevate: true, ring: colors.primary + "59" },
+    accent: { bg: colors.accentStrong, fg: colors.onAccent, border: "transparent", elevate: true, ring: colors.accentStrong + "59" },
+    secondary: { bg: colors.primarySoft, fg: colors.primaryDark, border: colors.border, elevate: false, ring: colors.primary + "4D" },
+    ghost: { bg: "transparent", fg: colors.primary, border: colors.border, elevate: false, ring: colors.primary + "4D" },
+    danger: { bg: colors.dangerBg, fg: colors.danger, border: colors.danger, elevate: false, ring: colors.danger + "4D" },
+    auth: { bg: p.primary[1], fg: p.white, border: "transparent", ring: p.focus },
+    authSecondary: { bg: p.controlBase, fg: p.azure, border: "transparent", ring: p.focus },
+    settings: { bg: p.primary[1], fg: p.white, border: "transparent", ring: p.focus },
+    settingsSecondary: { bg: colors.profileSettings.control[1], fg: colors.profileSettings.accent, border: "transparent", ring: p.focus },
+});
+
+// Consistent, touch-friendly, accessible button with hover/focus/pressed states.
+export default function Button({
+    title,
+    buttonRef,
+    iconOnly = false,
+    onPress,
+    variant = "primary",
+    icon,
+    iconPosition = "left",
+    loading = false,
+    loadingIndicator = true,
+    disabled = false,
+    fullWidth = true,
+    style,
+}) {
+    const { colors } = useTheme();
+    const VARIANTS = makeVariants(colors);
+    const v = VARIANTS[variant] || VARIANTS.primary;
+    const isDisabled = disabled || loading;
+    const auth = ["auth", "authSecondary", "settings", "settingsSecondary"].includes(variant);
+    const primaryMaterial = variant === "auth" || variant === "settings";
+    const material = variant.startsWith("settings") ? { ...p, control: colors.profileSettings.control,
+        controlShadow: colors.profileSettings.iconShadow } : p;
+
+    const handlePress = (e) => {
+        if (isDisabled) return;
+        if (Haptics && Haptics.selectionAsync) Haptics.selectionAsync().catch(() => {});
+        onPress && onPress(e);
+    };
+
+    return (
+        <Pressable ref={buttonRef}
+            {...(Platform.OS === "web" ? { "aria-busy": loading, "aria-disabled": isDisabled } : {})}
+            onPress={handlePress}
+            disabled={isDisabled}
+            accessibilityRole="button"
+            accessibilityLabel={title}
+            accessibilityState={{ disabled: isDisabled, busy: loading }}
+            style={({ pressed, hovered, focused }) => [
+                {
+                    minHeight: MIN_TOUCH + 4,
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: space.sm,
+                    paddingHorizontal: space.lg,
+                    borderRadius: radius.pill,
+                    borderCurve: "continuous",
+                    backgroundColor: v.bg,
+                    borderWidth: v.border === "transparent" ? 0 : 1,
+                    borderColor: v.border,
+                    alignSelf: fullWidth ? "stretch" : "flex-start",
+                    opacity: isDisabled ? 0.55 : hovered ? 0.94 : 1,
+                    transform: [{ scale: pressed && !auth ? 0.985 : 1 }],
+                },
+                v.elevate && !pressed ? shadow.raised : null,
+                focused ? { boxShadow: `0 0 0 3px ${v.ring}` } : null,
+                auth && { minHeight: 54, paddingVertical: 12, boxShadow: (primaryMaterial ? material.buttonShadow : material.controlShadow) +
+                    (focused ? `, 0 0 0 2px ${p.focus}` : ""), opacity: isDisabled ? 0.55 : pressed ? 0.9 : 1 },
+                style,
+            ]}
+        >
+            {auth ? <Gradient pointerEvents="none" colors={primaryMaterial ? material.primary : material.control}
+                start={{ x: 0.5, y: 0 }} end={{ x: 0.5, y: 1 }}
+                style={{ position: "absolute", inset: 0, borderRadius: radius.pill, boxShadow: p.buttonHighlight }} /> : null}
+            {loading && loadingIndicator ? (
+                <PulseLoader color={v.fg} size={22} />
+            ) : (
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: space.sm,
+                    maxWidth: "100%", minWidth: 0, flexShrink: 1 }}>
+                    {icon && iconPosition === "left" ? typeof icon === "string"
+                        ? <Ionicons name={icon} size={auth ? 22 : 18} color={v.fg} /> : icon : null}
+                    {!iconOnly ? <Text style={{ ...(auth ? type.bodyStrong : type.label), flexShrink: 1, textAlign: "center", ...(Platform.OS === "android" ? { includeFontPadding: false, textAlignVertical: "center" } : {}), color: v.fg }}>{title}</Text> : null}
+                    {icon && iconPosition === "right" ? typeof icon === "string"
+                        ? <Ionicons name={icon} size={auth ? 25 : 18} color={v.fg} />
+                        : <View>{icon}</View> : null}
+                </View>
+            )}
+        </Pressable>
+    );
+}

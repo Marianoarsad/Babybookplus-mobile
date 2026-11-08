@@ -1,0 +1,11 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),{transformSync}=require('@babel/core');
+const compile=s=>transformSync(s,{babelrc:false,configFile:false,plugins:['@babel/plugin-transform-react-jsx','@babel/plugin-transform-modules-commonjs']}).code;
+function load(file,imports={}){const m={exports:{}};new Function('require','module','exports',compile(fs.readFileSync(file,'utf8')))(n=>{assert(n in imports,n);return imports[n]},m,m.exports);return m.exports;}
+const theme=load(__dirname+'/../../theme.js');let colors=theme.PALETTES.boy;
+const React={createElement:(type,props,...children)=>({type,props:{...props,children:children.flat().filter(Boolean)}})};
+const Platform={OS:'android',Version:30},Card=load(__dirname+'/NeumorphicCard.js',{'react':{__esModule:true,default:React},'react-native':{View:'View',Platform,StyleSheet:{absoluteFill:{position:'absolute'}}},'../../context/ThemeContext':{useTheme:()=>({colors})},'./Gradient':{__esModule:true,default:'Gradient'}}).default;
+for(const palettes of [theme.PALETTES,theme.DARK_PALETTES])for(const key of ['boy','girl','neutral']){colors=palettes[key];const ref={},props={ref,children:'content',testID:'test',accessibilityLabel:'record'};
+const tree=Card(props),style=tree.props.style[0];assert.equal(style.padding,16);assert.equal(style.borderRadius,24);assert.equal(style.boxShadow,colors.detailSurface.shadow);assert.equal(tree.props.ref,ref);assert.equal(tree.props.accessibilityLabel,'record');assert.equal(tree.props.children.at(-1),'content');tree.props.children.slice(0,2).forEach(n=>assert.equal(n.props.pointerEvents,'none'));
+assert.equal(Card({...props,padding:0,radius:12,pressed:true}).props.style[0].boxShadow,colors.detailSurface.pressedShadow);assert.equal(Card({...props,inset:true}).props.style[0].boxShadow,colors.detailSurface.insetShadow);assert.equal(Card({...props,elevation:'none'}).props.style[0].boxShadow,undefined);}
+Platform.Version=24;assert.equal(Card({}).props.style[0].elevation,3);assert.equal(Card({}).props.style[0].boxShadow,undefined);Platform.Version=28;assert.equal(Card({inset:true}).props.style[0].boxShadow,undefined);Platform.OS='ios';assert.equal(Card({}).props.style[0].boxShadow,colors.detailSurface.shadow);
+console.log('Neumorphic card: six palettes, props/ref/children, padding/radius, press/inset, pointer safety and platform fallbacks passed.');

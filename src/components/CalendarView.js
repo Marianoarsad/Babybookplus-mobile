@@ -1,0 +1,1048 @@
+import RecordIcon from "./ui/RecordIcon";
+import { settingsSelectionStyle, recordItemStyle } from "../theme";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, useWindowDimensions } from "react-native";
+import Modal from "./ui/AppModal";
+import { Ionicons } from "@expo/vector-icons";
+import { Calendar } from "react-native-calendars";
+import { useTheme } from "../context/ThemeContext";
+import { space, radius, shadow, type, MIN_TOUCH } from "../theme";
+import { useScreenPadBottom, useScreenPadTop } from "../utils/responsive";
+import { api } from "../utils/api";
+import { useRecords, useScreenRefresh, useRecordSave } from "../utils/useRecords";
+import { buildCalendarEvents } from "../utils/calendarEvents";
+import { AppointmentsSkeleton } from "./ui/Skeleton";
+import ShowMore from "./ui/ShowMore";
+import PlansDashboardCard, { PlanAddButton, PlansEmptyState } from "./ui/PlansDashboardCard";
+import Gradient from "./ui/Gradient";
+import PullToRefreshScrollView from "./ui/PullToRefreshScrollView";
+import { DateField, TimeField } from "./ui/DateField";
+import { useToast } from "./ui/Toast";
+import { scheduleReminder } from "../utils/notifications";
+import { storage } from "../utils/storageAdapter";
+import { LEAD_TIME_KEY, LEAD_TIME_OPTIONS } from "./settings/GeneralSettings";
+
+import RecordFormSheet, { DeleteConfirmation, RecordFormGroup, RecordFormRow } from "./ui/RecordFormSheet";
+import PlanDetail from "./ui/PlanDetail";
+import SwipeActionRow from "./ui/SwipeActionRow";
+import { shortDate, shortTime, shiftMonthClamped, todayLocal } from "../utils/dates";
+import { plannedEnd } from "../utils/medication";
+import { CalendarArtwork, CalendarControl, CalendarDateCell, CalendarMonthTransition, CalendarSurface } from "./ui/CalendarVisuals";
+
+// Category -> theme-derived marker/accent color. Kept to semantic status tones
+// (not brand hex) so it stays consistent across the girl/boy palette switch.
+const CATEGORY_META = {
+    vaccination: { label: "Vaccination" },
+    checkup: { label: "Checkup" },
+    illness: { label: "Illness" },
+    medication: { label: "Medication" },
+    hospitalization: { label: "Hospitalization" },
+    custom: { label: "Custom Event" },
+};
+
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"];
+const LIST_PAGE = 3;
+const EmptyCalendarHeader = () => null;
+const PLAN_RESOURCES = {
+    vaccination: "vaccinations",
+    checkup: "checkups",
+    "medical-history": "medical-history",
+    "calendar-event": "calendar-events",
+};
+
+function monthText(value, short = false) {
+    const date = new Date(`${String(value || "").slice(0, 10)}T00:00:00`);
+    return isNaN(date.getTime()) ? "" : date.toLocaleDateString(undefined, { month: short ? "short" : "long" });
+}
+
+// One fixed colour per category, from theme.js's eventCategory token.
+//
+// This used to switch on colors.primary (checkup) and colors.accent (custom),
+// both of which come from the GENDER palette — so those two were always the
+// same hue family as each other, and the legend's meaning changed with the
+// child: a checkup marker was pink for a girl and blue for a boy. Measured, the
+// old set had three confusable pairs and "custom" scored 3.1-3.3:1 against
+// white, under the 4.5:1 minimum. See the note on eventCategory in theme.js.
+function categoryColor(colors, category) {
+    return (colors.eventCategory && colors.eventCategory[category]) || colors.eventCategory.custom;
+}
+
+function todayISO() {
+    return todayLocal();
+}
+
+// Calendar tab: monthly view over aggregated records (vaccinations,
+// checkups, medical history) — see CLAUDE.md §9. Reminders aren't fetched
+// separately: today's schema ties every reminder 1:1 to a vaccination or
+// checkup, so showing both would just duplicate the same event twice.
+export default function CalendarView({ profile, onNavigate }) {
+    const { colors } = useTheme();
+    const styles = useMemo(() => makeStyles(colors), [colors]);
+    const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+    const legendWidth = Math.min(300, screenWidth - space.lg * 2);
+    const padBottom = useScreenPadBottom();
+    const padTop = useScreenPadTop();
+    const toast = useToast();
+    const legendButtonRef = useRef(null);
+
+    const [selectedDate, setSelectedDate] = useState(todayISO());
+    const [activePlanTab, setActivePlanTab] = useState("today");
+    const [savingEvent, setSavingEvent] = useState(false);
+    const [deletingEventId, setDeletingEventId] = useState(null);
+    const deletePending = useRef(null);
+    const [detailEvent, setDetailEvent] = useState(null);
+    const [upcomingVisible, setUpcomingVisible] = useState(LIST_PAGE);
+    const [overdueVisible, setOverdueVisible] = useState(LIST_PAGE);
+    const [completedVisible, setCompletedVisible] = useState(LIST_PAGE);
+    const [showMonthPicker, setShowMonthPicker] = useState(false);
+    const [monthPickerYear, setMonthPickerYear] = useState(new Date().getFullYear());
+    const [showLegend, setShowLegend] = useState(false);
+    const [legendAnchor, setLegendAnchor] = useState({ top: 0, right: space.lg });
+    const [savingPlanKey, setSavingPlanKey] = useState(null);
+    const [openSwipeId, setOpenSwipeId] = useState(null);
+    const [deleteCandidate, setDeleteCandidate] = useState(null);
+    const deleteAnchor = useRef(null);
+
+    const [showEventModal, setShowEventModal] = useState(false);
+    const [editingEventId, setEditingEventId] = useState(null);
+    const [editingEvent, setEditingEvent] = useState(null);
+    const [formTitle, setFormTitle] = useState("");
+    const [formDescription, setFormDescription] = useState("");
+    const [formDate, setFormDate] = useState(todayISO());
+    const [formTime, setFormTime] = useState("");
+    const [formLead, setFormLead] = useState("1");
+
+    const childId = profile?.id;
+    useEffect(() => { deletePending.current = null; setDeleteCandidate(null); setDeletingEventId(null); }, [childId]);
+    const vaccinations = useRecords(childId, "vaccinations");
+    const checkups = useRecords(childId, "checkups");
+    const medHistory = useRecords(childId, "medical-history");
+    const customEvents = useRecords(childId, "calendar-events");
+    const planStatuses = useRecords(childId, "calendar-plan-statuses");
+    const eventsByDate = useMemo(() => buildCalendarEvents(vaccinations, checkups, medHistory, customEvents, planStatuses),
+        [vaccinations, checkups, medHistory, customEvents, planStatuses]);
+    const saveEvent = useRecordSave(showEventModal, childId, "calendar-events", editingEventId);
+
+    const fetchEvents = useCallback(async () => {
+        if (!childId) return [];
+        const resources = ["vaccinations", "checkups", "medical-history", "calendar-events", "calendar-plan-statuses"];
+        const results = await Promise.allSettled(resources.map((resource) =>
+            api.listRecords(childId, resource, { loading: "nonblocking" })));
+        return resources.filter((_, index) => results[index].status === "rejected");
+    }, [childId]);
+    const { refreshing: loading, failures: refreshFailures, refresh: loadEvents, isActive } = useScreenRefresh(childId, fetchEvents);
+
+    useEffect(() => {
+        (async () => {
+            const saved = await storage.getItem(LEAD_TIME_KEY);
+            if (saved) setFormLead(saved);
+        })();
+    }, []);
+
+    useLayoutEffect(() => {
+        setUpcomingVisible(LIST_PAGE);
+        setOverdueVisible(LIST_PAGE);
+        setActivePlanTab("today");
+        setOpenSwipeId(null);
+    }, [selectedDate, childId]);
+
+    useLayoutEffect(() => setCompletedVisible(LIST_PAGE), [childId]);
+
+    const markedDates = useMemo(() => {
+        const marks = {};
+        Object.entries(eventsByDate).forEach(([date, events]) => {
+            const seen = new Set();
+            const dayOfWeek = new Date(`${date}T00:00:00`).getDay();
+            marks[date] = {
+                // Keep one compact band per category. Multiple records still
+                // remain available in the selected-day list.
+                periods: events
+                    .filter((event) => {
+                        if (seen.has(event.category)) return false;
+                        seen.add(event.category);
+                        return true;
+                    })
+                    .slice(0, 3)
+                    .map((event) => ({
+                        color: categoryColor(colors, event.category),
+                        startingDay: !event.rangeStart || date === event.rangeStart || dayOfWeek === 1,
+                        endingDay: !event.rangeEnd || date === event.rangeEnd || dayOfWeek === 0,
+                    })),
+            };
+        });
+        marks[selectedDate] = {
+            ...(marks[selectedDate] || {}),
+            selected: true,
+            selectedColor: colors.calendarSurface.active[1],
+        };
+        return marks;
+    }, [eventsByDate, selectedDate, colors]);
+
+    const calendarTheme = useMemo(
+        () => ({
+            calendarBackground: "transparent",
+            textSectionTitleColor: colors.textMuted,
+            selectedDayBackgroundColor: colors.primary,
+            selectedDayTextColor: colors.onPrimary,
+            todayTextColor: colors.primary,
+            dayTextColor: colors.text,
+            textDisabledColor: colors.border,
+            dotColor: colors.primary,
+            arrowColor: colors.primary,
+            monthTextColor: colors.text,
+            textMonthFontFamily: type.heading.fontFamily,
+            textMonthFontWeight: type.heading.fontWeight,
+            textDayFontFamily: type.caption.fontFamily,
+            textDayFontWeight: type.caption.fontWeight,
+            textDayHeaderFontFamily: type.caption.fontFamily,
+            textDayHeaderFontWeight: "700",
+            // Keep the built-in header mounted for its imperative swipe handlers.
+            "stylesheet.calendar.header": {
+                header: { height: 0, marginTop: 0, paddingHorizontal: 0 },
+                headerContainer: { height: 0 },
+            },
+            "stylesheet.calendar.main": {
+                container: { paddingLeft: 0, paddingRight: 0, backgroundColor: "transparent", overflow: "visible" },
+                week: { marginVertical: 4, flexDirection: "row", justifyContent: "space-around" },
+                dayContainer: { flex: 1, alignItems: "center", overflow: "visible" },
+            },
+        }),
+        [colors],
+    );
+
+    const byTime = (a, b) =>
+        (a.time || "99:99").localeCompare(b.time || "99:99") || (a.title || "").localeCompare(b.title || "");
+    const dayEvents = useMemo(() => [...(eventsByDate[selectedDate] || [])].sort(byTime), [eventsByDate, selectedDate]);
+    const incompleteDayEvents = dayEvents.filter((event) => !event.completed);
+    const flatEvents = useMemo(() => Object.values(eventsByDate).flat(), [eventsByDate]);
+    const today = todayISO();
+    const completedEvents = useMemo(
+        () =>
+            flatEvents
+                .filter((event) => event.completed && !event.courseOccurrence)
+                .sort((a, b) => {
+                    if (a.date === today && b.date !== today) return -1;
+                    if (a.date !== today && b.date === today) return 1;
+                    return b.date.localeCompare(a.date) || byTime(a, b);
+                }),
+        [flatEvents, today],
+    );
+    const visibleCompletedEvents = completedEvents.slice(0, completedVisible);
+    const visibleTodayCompleted = visibleCompletedEvents.filter((event) => event.date === today);
+    const visibleOtherCompleted = visibleCompletedEvents.filter((event) => event.date !== today);
+    const upcomingFrom = selectedDate > today ? selectedDate : today;
+    const upcomingEvents = useMemo(
+        () =>
+            flatEvents
+                .filter(
+                    (event) =>
+                        event.date > upcomingFrom &&
+                        !event.completed &&
+                        !event.courseOccurrence &&
+                        ["vaccination", "checkup", "medication", "custom"].includes(event.category),
+                )
+                .sort((a, b) => a.date.localeCompare(b.date) || byTime(a, b)),
+        [flatEvents, upcomingFrom],
+    );
+    const overdueEvents = useMemo(
+        () =>
+            flatEvents
+                .filter(
+                    (event) =>
+                        event.date < today &&
+                        !event.completed &&
+                        !event.courseOccurrence &&
+                        ["vaccination", "checkup"].includes(event.category),
+                )
+                .sort((a, b) => a.date.localeCompare(b.date) || byTime(a, b)),
+        [flatEvents, today],
+    );
+
+    const monthOptions = [-1, 0, 1].map((offset) => ({ offset, date: shiftMonthClamped(selectedDate, offset) }));
+
+    const changeMonth = (offset) => {
+        const next = shiftMonthClamped(selectedDate, offset);
+        if (next) setSelectedDate(next);
+    };
+
+    const openMonthPicker = () => {
+        const selectedYear = Number(selectedDate.slice(0, 4));
+        setMonthPickerYear(selectedYear);
+        setShowMonthPicker(true);
+    };
+
+    const openLegend = () => {
+        legendButtonRef.current?.measureInWindow((x, y, width, height) => {
+            setLegendAnchor({
+                top: Math.max(space.lg, Math.min(y + height + space.xs, screenHeight - 140)),
+                right: Math.min(Math.max(space.lg, screenWidth - x - width), screenWidth - legendWidth - space.lg),
+            });
+            setShowLegend(true);
+        });
+    };
+
+    const selectMonth = (monthIndex) => {
+        const offset = (monthPickerYear - Number(selectedDate.slice(0, 4))) * 12
+            + monthIndex - (Number(selectedDate.slice(5, 7)) - 1);
+        setSelectedDate(shiftMonthClamped(selectedDate, offset));
+        setShowMonthPicker(false);
+    };
+
+    const handleMonthChange = (month) => {
+        const current = new Date(`${selectedDate}T00:00:00`);
+        const target = new Date(`${month.dateString}T00:00:00`);
+        const offset = (target.getFullYear() - current.getFullYear()) * 12 + target.getMonth() - current.getMonth();
+        if (offset) changeMonth(offset);
+    };
+
+    const openCreateModal = () => {
+        setEditingEventId(null);
+        setEditingEvent(null);
+        setFormTitle("");
+        setFormDescription("");
+        setFormDate(selectedDate);
+        setFormTime("");
+        setShowEventModal(true);
+    };
+
+    const openEditModal = (ev) => {
+        setEditingEventId(ev.rawId);
+        setEditingEvent(ev);
+        setFormTitle(ev.title);
+        setFormDescription(ev.notes || "");
+        setFormDate(ev.date || selectedDate);
+        setFormTime(ev.time || "");
+        setFormLead(ev.reminderSettings?.leadDays != null ? String(ev.reminderSettings.leadDays) : formLead);
+        setDetailEvent(null);
+        setShowEventModal(true);
+    };
+
+    const scheduleEventReminder = async (title, dateStr, leadDays) => {
+        const lead = Number(leadDays) || 0;
+        const target = new Date(`${dateStr}T09:00:00`);
+        target.setDate(target.getDate() - lead);
+        if (target.getTime() > Date.now()) {
+            await scheduleReminder("Upcoming: " + title, `On your calendar for ${dateStr}`, target);
+        }
+    };
+
+    const handleSaveEvent = async () => {
+        if (!formTitle.trim()) {
+            toast.error("Please enter a title");
+            return;
+        }
+        if (!formDate) {
+            toast.error("Please choose a date");
+            return;
+        }
+        if (savingEvent) return;
+        setSavingEvent(true);
+        const body = {
+            title: formTitle.trim(),
+            description: formDescription || null,
+            event_type: "custom",
+            event_date: formDate,
+            event_time: formTime || null,
+            reminder_settings: { leadDays: Number(formLead) || 0 },
+        };
+        try {
+            await saveEvent(body);
+            await scheduleEventReminder(formTitle.trim(), formDate, formLead);
+            setShowEventModal(false);
+            toast.success(editingEventId ? "Event updated" : "Event added");
+        } catch (e) {
+            toast.error(e.message || "Could not save event");
+        } finally {
+            setSavingEvent(false);
+        }
+    };
+
+    const handleDeleteEvent = async (ev) => {
+        if (!ev || deletePending.current || !isActive()) return false;
+        const resource = PLAN_RESOURCES[ev.sourceType];
+        if (!resource) {
+            toast.error("This plan cannot be deleted here");
+            return false;
+        }
+        const operation = {}; deletePending.current = operation;
+        setDeletingEventId(ev.id);
+        try {
+            if (resource === "calendar-events") {
+                await api.optimisticRecord(childId, resource, "delete", ev.sourceId, {}, { label: ev.title });
+            } else {
+                await api.deleteRecord(childId, resource, ev.sourceId);
+                if (!isActive()) return false;
+                await loadEvents();
+            }
+            if (!isActive()) return false;
+            setDetailEvent(null); setDeleteCandidate(null); setOpenSwipeId(null);
+            toast.success("Plan deleted");
+            return true;
+        } catch (e) {
+            if (isActive()) toast.error(e.message || "Could not delete event");
+            return false;
+        } finally {
+            if (deletePending.current === operation) { deletePending.current = null; if (isActive()) setDeletingEventId(null); }
+        }
+    };
+
+    const togglePlan = async (event) => {
+        if (event.pending || !event.planKey) return;
+        const completed = !event.completed;
+        setSavingPlanKey(event.planKey);
+        try {
+            await api.optimisticRecord(childId, "calendar-plan-statuses", event.planStatusId ? "update" : "create", event.planStatusId,
+                event.planStatusId ? { completed } : {
+                    source_type: event.sourceType, source_id: event.sourceId, occurrence_date: event.date, completed,
+                }, { entity: event.planKey, label: event.title });
+        } catch (error) { toast.error(error.message || "Could not update plan"); }
+        finally { setSavingPlanKey((current) => current === event.planKey ? null : current); }
+    };
+
+    const renderEventContent = (ev, showDate, checklist, tone, neutral = false) => {
+        const meta = CATEGORY_META[ev.category] || { label: ev.category };
+        const when = showDate ? shortDate(ev.date) : ev.time ? shortTime(ev.time) : "All day";
+        return (
+            <>
+                {!showDate ? <View style={styles.eventWhen}>
+                    <Text style={[styles.eventWhenText, { color: tone }]} numberOfLines={2}>
+                        {when}
+                    </Text>
+                </View> : null}
+                {ev.category !== "custom" ? <RecordIcon category={ev.category} record={ev.sourceRecord} size={32} /> : null}
+                <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={styles.eventTitle} numberOfLines={2} ellipsizeMode="tail">
+                        {ev.title}
+                    </Text>
+                    <Text style={styles.eventSubtitle} numberOfLines={2} ellipsizeMode="tail">
+                        {meta.label}
+                        {ev.subtitle ? ` · ${ev.subtitle}` : ""}
+                    </Text>
+                    {showDate ? <Text style={[styles.eventSubtitle, { marginTop: space.xs }]}>
+                        {when}{ev.time ? ` · ${shortTime(ev.time)}` : ""}
+                    </Text> : null}
+                </View>
+                {checklist ? (
+                    <TouchableOpacity
+                        style={styles.checkButton}
+                        onPress={(pressEvent) => {
+                            pressEvent.stopPropagation?.();
+                            togglePlan(ev);
+                        }}
+                        disabled={ev.pending || savingPlanKey === ev.planKey}
+                        accessibilityRole="checkbox"
+                        accessibilityLabel={`${ev.completed ? "Uncheck" : "Complete"} ${ev.title}`}
+                        accessibilityState={{ checked: ev.completed, disabled: ev.pending || savingPlanKey === ev.planKey, busy: ev.pending || savingPlanKey === ev.planKey }}
+                    >
+                        {(<Ionicons
+                            name={ev.completed ? "checkmark-circle" : "ellipse-outline"}
+                            size={24}
+                            color={neutral ? colors.textSecondary : ev.completed ? colors.success : colors.textMuted}
+                        />)}
+                    </TouchableOpacity>
+                ) : ev.completed ? (
+                    <Ionicons
+                        name="checkmark-circle"
+                        size={18}
+                        color={neutral ? colors.textSecondary : colors.success}
+                        style={styles.eventComplete}
+                    />
+                ) : null}
+            </>
+        );
+    };
+
+    const renderEventRow = (ev, showDate = false, checklist = false) => {
+        const meta = CATEGORY_META[ev.category] || { label: ev.category };
+        const tone = colors.textSecondary;
+        return (
+            <TouchableOpacity
+                key={ev.id}
+                style={styles.eventRow}
+                onPress={() => setDetailEvent(ev)}
+                accessibilityRole="button"
+                accessibilityLabel={`${meta.label}: ${ev.title}`}
+            >
+                <Gradient accessible={false} pointerEvents="none" colors={colors.recordItem.surface}
+                    style={[StyleSheet.absoluteFill, { borderRadius: 24 }]} />
+                {renderEventContent(ev, showDate, checklist, tone, true)}
+            </TouchableOpacity>
+        );
+    };
+
+    const updateHealthPlan = (ev) => {
+        const tab = {
+            vaccination: "immunizations",
+            checkup: "appointments",
+            medication: "medications",
+            illness: "illnesses",
+            hospitalization: "appointments",
+        }[ev.category];
+        setOpenSwipeId(null);
+        if (tab) onNavigate?.("health", tab, { sourceType: ev.sourceType, record: ev.sourceRecord });
+    };
+
+    const renderSwipeableRow = (ev, showDate = false, checklist = false, onPress = null, neutral = false) => {
+        const custom = ev.category === "custom";
+        const meta = CATEGORY_META[ev.category] || { label: ev.category };
+        const tone = custom ? categoryColor(colors, ev.category) : colors.success;
+        const actions = custom
+            ? [
+                  { key: "update", label: "Update", icon: "create-outline", color: colors.primaryDark, onPress: () => { setOpenSwipeId(null); openEditModal(ev); } },
+                  { key: "delete", label: "Delete", icon: "trash-outline", color: colors.onAccent, kind: "delete", onPressWithAnchor: anchor => { deleteAnchor.current = anchor; setOpenSwipeId(null); setDeleteCandidate(ev); } },
+              ]
+            : [
+                  { key: "update", label: "Update", icon: "create-outline", color: colors.primaryDark, onPress: () => updateHealthPlan(ev) },
+                  { key: "delete", label: "Delete", icon: "trash-outline", color: colors.onAccent, kind: "delete", onPressWithAnchor: anchor => { deleteAnchor.current = anchor; setOpenSwipeId(null); setDeleteCandidate(ev); } },
+              ];
+
+        return (
+            <SwipeActionRow
+                key={ev.id}
+                open={openSwipeId === ev.id}
+                onOpen={() => setOpenSwipeId(ev.id)}
+                onClose={() => setOpenSwipeId(null)}
+                onPress={onPress}
+                actions={actions}
+                label={`${meta.label}: ${ev.title}`}
+            >
+                <View
+                    style={[
+                        styles.eventRow,
+                        styles.swipeEventRow,
+                        { backgroundColor: colors.recordItem.surface[0] },
+                    ]}
+                >
+                    <Gradient accessible={false} pointerEvents="none" colors={colors.recordItem.surface}
+                        style={[StyleSheet.absoluteFill, { borderRadius: 24 }]} />
+                    {renderEventContent(ev, showDate, checklist, neutral ? colors.textSecondary : tone, neutral)}
+                </View>
+            </SwipeActionRow>
+        );
+    };
+
+    const detailPlan = detailEvent ? (() => {
+        const record = detailEvent.sourceRecord || {};
+        const details = [];
+        if (detailEvent.category === "vaccination") {
+            if (record.dose_number) details.push({ label: "Dose", value: String(record.dose_number) });
+            if (record.visit_name) details.push({ label: "Visit", value: record.visit_name });
+            if (record.date_given) details.push({ label: "Given", value: shortDate(record.date_given) });
+        } else if (detailEvent.category === "checkup") {
+            if (record.doctor_name) details.push({ label: "Provider", value: record.doctor_name });
+            if (record.clinic) details.push({ label: "Clinic", value: record.clinic });
+        } else if (detailEvent.category === "medication") {
+            if (record.dose_amount) details.push({ label: "Dose", value: record.dose_amount });
+            if (record.prescribed_by) details.push({ label: "Prescribed by", value: record.prescribed_by });
+            if (detailEvent.rangeEnd && detailEvent.rangeEnd !== detailEvent.rangeStart) {
+                details.push({ label: "Course ends", value: shortDate(detailEvent.rangeEnd) });
+            }
+        } else if (detailEvent.category === "illness" || detailEvent.category === "hospitalization") {
+            if (record.facility) details.push({ label: "Facility", value: record.facility });
+            if (record.care_level) details.push({ label: "Care", value: record.care_level });
+        }
+        const lead = detailEvent.reminderSettings?.leadDays;
+        const reminderLabel = lead == null ? null : Number(lead) === 0 ? "Same day" : `${lead} day${Number(lead) === 1 ? "" : "s"} before`;
+        return {
+            ...detailEvent,
+            categoryLabel: (CATEGORY_META[detailEvent.category] || {}).label || detailEvent.category,
+            color: categoryColor(colors, detailEvent.category),
+            status: detailEvent.completed ? "Done" : detailEvent.date < today ? "Overdue" : "Scheduled",
+            details,
+            reminderLabel,
+            showReminder: detailEvent.category === "custom",
+            deleteLabel: detailEvent.category === "custom" ? "Delete event" : "Delete health record",
+        };
+    })() : null;
+
+    return (
+        <View style={styles.container}>
+            <PullToRefreshScrollView scope={childId} refreshing={loading} onRefresh={loadEvents}
+                error={refreshFailures.length ? "Some records could not be refreshed. Please retry." : ""}
+                contentContainerStyle={[styles.scrollContent, { paddingTop: padTop, paddingBottom: padBottom }]}
+                keyboardShouldPersistTaps="handled"
+            >
+                <View style={styles.monthCard} testID="calendar-card">
+                    <CalendarSurface />
+                    <View style={styles.calendarHeader}>
+                        <CalendarControl
+                            onPress={openMonthPicker}
+                            style={styles.headerIconButton}
+                            kind="icon"
+                            circular
+                            accessibilityRole="button"
+                            accessibilityLabel="Choose month and year"
+                            accessibilityState={{ expanded: showMonthPicker }}
+                        >
+                            <CalendarArtwork />
+                        </CalendarControl>
+                        <CalendarControl
+                            ref={legendButtonRef}
+                            onPress={openLegend}
+                            style={styles.headerIconButton}
+                            kind="icon"
+                            circular
+                            accessibilityRole="button"
+                            accessibilityLabel="Show calendar legend"
+                            accessibilityState={{ expanded: showLegend }}
+                        >
+                            <CalendarArtwork information />
+                        </CalendarControl>
+                    </View>
+                    <View style={styles.monthStrip}>
+                        {monthOptions.map(({ offset, date }) => offset === 0 ? (
+                            <View
+                                key={offset}
+                                style={[styles.monthOption, styles.monthOptionActive]}
+                                accessible
+                                accessibilityLabel={`${monthText(date)} ${date.slice(0, 4)}`}
+                                testID="calendar-active-month"
+                            >
+                                <CalendarSurface kind="active" radius={999} />
+                                <Text style={[styles.monthOptionText, styles.monthOptionTextActive]} numberOfLines={1}>
+                                    {monthText(date)}
+                                </Text>
+                            </View>
+                        ) : (
+                            <CalendarControl
+                                key={offset}
+                                onPress={() => changeMonth(offset)}
+                                style={styles.monthOption}
+                                accessibilityRole="button"
+                                accessibilityLabel={`${monthText(date)} ${date.slice(0, 4)}`}
+                            >
+                                <Text style={styles.monthOptionText} numberOfLines={1}>
+                                    {monthText(date, true)}
+                                </Text>
+                            </CalendarControl>
+                        ))}
+                    </View>
+                    <View style={styles.weekdayRow}>
+                        {WEEKDAYS.map((day) => (
+                            <Text key={day} style={styles.weekdayText}>
+                                {day}
+                            </Text>
+                        ))}
+                    </View>
+                    <CalendarMonthTransition month={selectedDate.slice(0, 7)} width={screenWidth}>
+                        <Calendar
+                            initialDate={`${selectedDate.slice(0, 7)}-01`}
+                            firstDay={1}
+                            enableSwipeMonths
+                            disableMonthChange
+                            hideArrows
+                            hideDayNames
+                            renderHeader={EmptyCalendarHeader}
+                            headerStyle={styles.hiddenCalendarHeader}
+                            dayComponent={CalendarDateCell}
+                            markingType="multi-period"
+                            markedDates={markedDates}
+                            onDayPress={(day) => setSelectedDate(day.dateString)}
+                            onMonthChange={handleMonthChange}
+                            theme={calendarTheme}
+                            style={styles.monthCalendar}
+                        />
+                    </CalendarMonthTransition>
+                </View>
+
+                <PlansDashboardCard
+                    value={activePlanTab}
+                    onChange={(value) => { setOpenSwipeId(null); setActivePlanTab(value); }}
+                    counts={{ today: incompleteDayEvents.length, upcoming: upcomingEvents.length,
+                        overdue: overdueEvents.length, completed: completedEvents.length }}
+                    title={{ today: selectedDate === today ? "Today's Plan" : `Plan for ${shortDate(selectedDate)}`,
+                        upcoming: "Upcoming Plans", overdue: "Overdue", completed: "Completed" }[activePlanTab]}
+                    action={activePlanTab === "today" && incompleteDayEvents.length > 0 ?
+                        <PlanAddButton onPress={openCreateModal} accessibilityLabel={`Add a plan for ${shortDate(selectedDate)}`} /> : null}
+                >
+                    {activePlanTab === "today" ? loading && !dayEvents.length ? (
+                        <AppointmentsSkeleton />
+                    ) : incompleteDayEvents.length ? (
+                        incompleteDayEvents.map((event) => renderSwipeableRow(event, false, true, () => setDetailEvent(event), true))
+                    ) : (
+                        <PlansEmptyState message={dayEvents.length ? "No unfinished plans for this day." : "No plans recorded for this day."}
+                            onAddPlan={openCreateModal} addPlanLabel={`Add a plan for ${shortDate(selectedDate)}`} />
+                    ) : activePlanTab === "upcoming" ? upcomingEvents.length ? (
+                        <>
+                            {upcomingEvents.slice(0, upcomingVisible).map((event) => renderSwipeableRow(event, true, false, () => setDetailEvent(event)))}
+                            <ShowMore
+                                total={upcomingEvents.length}
+                                visible={upcomingVisible}
+                                noun="plans"
+                                onPress={() => setUpcomingVisible((value) => Math.min(value + 10, upcomingEvents.length))}
+                            />
+                        </>
+                    ) : (
+                        <PlansEmptyState message="No upcoming plans." />
+                    ) : activePlanTab === "overdue" ? overdueEvents.length ? (
+                        <>
+                            {overdueEvents.slice(0, overdueVisible).map((event) => renderEventRow(event, true))}
+                            <ShowMore
+                                total={overdueEvents.length}
+                                visible={overdueVisible}
+                                noun="overdue plans"
+                                onPress={() => setOverdueVisible((value) => Math.min(value + 10, overdueEvents.length))}
+                            />
+                        </>
+                    ) : (
+                        <PlansEmptyState message="No overdue vaccines or checkups." />
+                    ) : completedEvents.length ? (
+                        <>
+                            {visibleTodayCompleted.length ? (
+                                <>
+                                    <Text style={styles.completedGroupTitle}>Today</Text>
+                                    {visibleTodayCompleted.map((event) => renderSwipeableRow(event, true, true, () => setDetailEvent(event), true))}
+                                </>
+                            ) : null}
+                            {visibleOtherCompleted.map((event) => renderSwipeableRow(event, true, true, () => setDetailEvent(event), true))}
+                            <ShowMore
+                                total={completedEvents.length}
+                                visible={completedVisible}
+                                noun="completed plans"
+                                onPress={() => setCompletedVisible((value) => Math.min(value + 10, completedEvents.length))}
+                            />
+                        </>
+                    ) : (
+                        <PlansEmptyState message="No completed plans." />
+                    )}
+                </PlansDashboardCard>
+            </PullToRefreshScrollView>
+
+            <Modal visible={showLegend} transparent animationType="fade" onRequestClose={() => setShowLegend(false)}>
+                <TouchableOpacity activeOpacity={1} style={styles.legendBackdrop} onPress={() => setShowLegend(false)}>
+                    <TouchableOpacity
+                        activeOpacity={1}
+                        style={[styles.legendPopover, { top: legendAnchor.top, right: legendAnchor.right, width: legendWidth }]}
+                        onPress={() => {}}
+                        accessibilityViewIsModal
+                    >
+                        <View style={styles.legendRow}>
+                            {Object.entries(CATEGORY_META).map(([key, meta]) => (
+                                <View key={key} style={styles.legendItem}>
+                                    <View style={[styles.legendBand, { backgroundColor: categoryColor(colors, key) }]} />
+                                    <Text style={styles.legendText} numberOfLines={1}>{meta.label}</Text>
+                                </View>
+                            ))}
+                        </View>
+                    </TouchableOpacity>
+                </TouchableOpacity>
+            </Modal>
+
+            <Modal visible={showMonthPicker} transparent animationType="fade" onRequestClose={() => setShowMonthPicker(false)}>
+                <TouchableOpacity activeOpacity={1} style={styles.modalBg} onPress={() => setShowMonthPicker(false)}>
+                    <TouchableOpacity activeOpacity={1} style={styles.monthPickerCard} onPress={() => {}}>
+                        <View style={styles.monthPickerHeading}>
+                            <View style={styles.yearNavigation}>
+                                <CalendarControl circular kind="icon" style={styles.yearButton} onPress={() => setMonthPickerYear(year => year - 1)}
+                                    accessibilityRole="button" accessibilityLabel="Previous year">
+                                    <Ionicons name="chevron-back" size={20} color={colors.calendarSurface.text} />
+                                </CalendarControl>
+                                <Text style={styles.monthPickerTitle} accessibilityLiveRegion="polite">{monthPickerYear}</Text>
+                                <CalendarControl circular kind="icon" style={styles.yearButton} onPress={() => setMonthPickerYear(year => year + 1)}
+                                    accessibilityRole="button" accessibilityLabel="Next year">
+                                    <Ionicons name="chevron-forward" size={20} color={colors.calendarSurface.text} />
+                                </CalendarControl>
+                            </View>
+                            <Text style={styles.monthPickerHint}>Choose a month and year</Text>
+                        </View>
+                        <View style={styles.monthGrid}>
+                            {MONTHS.map((label, index) => {
+                                const selected = Number(selectedDate.slice(0, 4)) === monthPickerYear && Number(selectedDate.slice(5, 7)) === index + 1;
+                                return (
+                                    <TouchableOpacity
+                                        key={label}
+                                        style={[styles.monthCell, selected && styles.monthCellSelected]}
+                                        onPress={() => selectMonth(index)}
+                                        accessibilityRole="button"
+                                        accessibilityLabel={`${label} ${monthPickerYear}`}
+                                        accessibilityState={{ selected }}
+                                    >
+                                        <Text style={[styles.monthCellText, selected && styles.monthCellTextSelected]}>{label}</Text>
+                                    </TouchableOpacity>
+                                );
+                            })}
+                        </View>
+                        <TouchableOpacity style={styles.monthPickerBack} onPress={() => setShowMonthPicker(false)} accessibilityRole="button" accessibilityLabel="Back to calendar">
+                            <Ionicons name="arrow-back" size={22} color={colors.calendarSurface.text} />
+                        </TouchableOpacity>
+                    </TouchableOpacity>
+                </TouchableOpacity>
+            </Modal>
+
+            <PlanDetail
+                visible={!!detailEvent}
+                plan={detailPlan}
+                heroContent={detailEvent && detailEvent.category !== "custom" ? <RecordIcon category={detailEvent.category} record={detailEvent.sourceRecord} size={48} /> : undefined}
+                onClose={() => setDetailEvent(null)}
+                onEdit={() => {
+                    if (detailEvent?.category === "custom") {
+                        const event = detailEvent;
+                        setDetailEvent(null);
+                        openEditModal(event);
+                    } else {
+                        updateHealthPlan(detailEvent);
+                    }
+                }}
+                onDelete={anchor => { deleteAnchor.current = anchor; setDeleteCandidate(detailEvent); }}
+                deleting={deletingEventId === detailEvent?.id}
+            />
+
+            <DeleteConfirmation anchor={deleteAnchor.current} visible={!!deleteCandidate} title={"Delete plan?"}
+ message={deleteCandidate ? `Delete "${deleteCandidate.title}"? This cannot be undone.` : ""} busy={!!deletingEventId}
+ onCancel={() => setDeleteCandidate(null)} onConfirm={() => handleDeleteEvent(deleteCandidate)} />
+
+            <RecordFormSheet visible={showEventModal} title={editingEventId ? "Edit Event" : "Add Custom Event"}
+                onClose={() => setShowEventModal(false)} onSubmit={handleSaveEvent} busy={savingEvent}
+                cancelLabel={"Cancel"} submitLabel={editingEventId ? "Save" : "Add"}
+                record={editingEventId != null ? { id: editingEventId } : null} onDelete={editingEventId != null ? () => handleDeleteEvent(editingEvent) : undefined} deleteTitle={"Delete plan?"} deleteMessage={`Delete "${editingEvent?.title || ""}"? This cannot be undone.`}>
+                <RecordFormGroup>
+
+                            <RecordFormRow label={<Text style={styles.formLabel}>Title</Text>}>
+
+                            <TextInput
+                                style={[styles.formInput, { backgroundColor: "transparent", borderWidth: 0 }]}
+                                value={formTitle}
+                                onChangeText={setFormTitle}
+                                placeholder="e.g. Grandma's visit"
+                                placeholderTextColor={colors.placeholder}
+                            />
+                            </RecordFormRow>
+
+                            <RecordFormRow label={<Text style={styles.formLabel}>Description (optional)</Text>}>
+
+                            <TextInput style={[styles.formInput, { backgroundColor: "transparent", borderWidth: 0 }]} value={formDescription} onChangeText={setFormDescription} />
+                            </RecordFormRow>
+
+                            <RecordFormRow label={<Text style={styles.formLabel}>Date</Text>}>
+
+                            <DateField value={formDate} onChange={setFormDate} />
+                            </RecordFormRow>
+
+                            <RecordFormRow label={<Text style={styles.formLabel}>Time (optional)</Text>}>
+
+                            <TimeField value={formTime} onChange={setFormTime} />
+                            </RecordFormRow>
+
+                            <Text style={styles.formLabel}>Remind me</Text>
+                            <View style={styles.leadRow}>
+                                {LEAD_TIME_OPTIONS.map((opt) => (
+                                    <TouchableOpacity
+                                        key={opt.key}
+                                        onPress={() => setFormLead(opt.key)}
+                                        style={[styles.leadOption, formLead === opt.key && styles.leadOptionActive, settingsSelectionStyle(colors, !!(formLead === opt.key))]}
+                                        accessibilityRole="radio"
+                                        accessibilityState={{ selected: formLead === opt.key }}
+                                    >
+                                        <Text style={[[styles.leadOptionText, formLead === opt.key && styles.leadOptionTextActive], {color: (formLead === opt.key) ? colors.profileSettings.accent : colors.profileSettings.text}]}>
+                                            {opt.label}
+                                        </Text>
+                                    </TouchableOpacity>
+                                ))}
+                            </View>
+
+                </RecordFormGroup>
+            </RecordFormSheet>
+        </View>
+    );
+}
+
+const makeStyles = (colors) =>
+    StyleSheet.create({
+        // transparent, not colors.background: App.js paints the page gradient.
+
+        container: { flex: 1, backgroundColor: "transparent" },
+        // paddingBottom applied inline — space.xxl (32) left the last event
+        // underneath the tab bar and the floating button.
+        scrollContent: { padding: space.lg },
+        monthCard: {
+            backgroundColor: colors.calendarSurface.panel[1],
+            borderRadius: 28,
+            borderCurve: "continuous",
+            paddingHorizontal: space.md,
+            paddingTop: space.md,
+            paddingBottom: space.md,
+            marginBottom: space.md,
+            overflow: "visible",
+            boxShadow: colors.calendarSurface.panelShadow,
+        },
+        calendarHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+        headerIconButton: {
+            width: MIN_TOUCH,
+            height: MIN_TOUCH,
+        },
+        monthStrip: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: space.md },
+        monthOption: {
+            flex: 1,
+            minWidth: 0,
+            minHeight: MIN_TOUCH,
+            flexDirection: "row",
+            gap: 4,
+            alignItems: "center",
+            justifyContent: "center",
+            paddingHorizontal: space.xs,
+        },
+        monthOptionActive: { flex: 1.3, borderRadius: 999, boxShadow: colors.calendarSurface.activeShadow },
+        monthOptionText: { ...type.label, fontSize: 13, flexShrink: 1, color: colors.calendarSurface.secondary },
+        monthOptionTextActive: { color: colors.calendarSurface.onActive, fontWeight: "700" },
+        monthPickerCard: {
+            width: "100%",
+            maxWidth: 360,
+            padding: space.md,
+            borderRadius: radius.xl,
+            borderCurve: "continuous",
+            backgroundColor: colors.surface,
+            ...shadow.raised,
+        },
+        monthPickerHeading: { alignItems: "center", padding: space.sm, gap: 2 },
+        yearNavigation: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", width: "100%", marginBottom: space.sm },
+        yearButton: { width: MIN_TOUCH, height: MIN_TOUCH },
+        monthPickerTitle: { ...type.heading, color: colors.text },
+        monthPickerHint: { ...type.caption, color: colors.textMuted },
+        monthGrid: { flexDirection: "row", flexWrap: "wrap", paddingVertical: space.md },
+        monthCell: { width: "33.333%", minHeight: 52, alignItems: "center", justifyContent: "center", borderRadius: radius.md, borderCurve: "continuous" },
+        monthCellSelected: { backgroundColor: colors.calendarSurface.active[2] },
+        monthCellText: { ...type.label, color: colors.textSecondary },
+        monthCellTextSelected: { color: colors.calendarSurface.onActive },
+        monthPickerBack: { minHeight: MIN_TOUCH, alignSelf: "flex-end", justifyContent: "center", paddingHorizontal: space.sm },
+        monthPickerBackText: { ...type.label, color: colors.textSecondary },
+        weekdayRow: { flexDirection: "row", marginBottom: space.xs },
+        weekdayText: {
+            ...type.caption,
+            flex: 1,
+            color: colors.textMuted,
+            fontWeight: "700",
+            textAlign: "center",
+        },
+        monthCalendar: { backgroundColor: "transparent", overflow: "visible" },
+        hiddenCalendarHeader: { display: "none" },
+        legendBackdrop: { flex: 1 },
+        legendPopover: {
+            position: "absolute",
+            padding: space.md,
+            borderWidth: 1,
+            borderColor: colors.hairline,
+            borderRadius: radius.lg,
+            borderCurve: "continuous",
+            backgroundColor: colors.surface,
+            ...shadow.raised,
+        },
+        // Six equal, centered cells keep the popover compact and scannable.
+        legendRow: {
+            flexDirection: "row",
+            flexWrap: "wrap",
+            rowGap: space.md,
+        },
+        legendItem: {
+            // Explicit longhand, never `flex: 0` — react-native-web passes
+            // that through to CSS as `0 1 0%`, and a 0% basis overrides any
+            // width, collapsing the item to nothing. Same trap documented in
+            // Dashboard.js.
+            flexGrow: 0,
+            flexShrink: 0,
+            flexBasis: "33.33%",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: space.xs,
+        },
+        // Same rounded-band shape used under dates in the month grid.
+        legendBand: {
+            width: 16,
+            height: 4,
+            borderRadius: radius.pill,
+            borderCurve: "continuous",
+            flexShrink: 0,
+        },
+        // The band sits above the text so the longest label fits its third at 320pt.
+        legendText: { ...type.caption, fontSize: 12, color: colors.textSecondary, textAlign: "center", width: "100%" },
+        completedGroupTitle: { ...type.label, color: colors.textSecondary, marginBottom: space.sm },
+        eventRow: { ...recordItemStyle(colors),
+            flexDirection: "row",
+            alignItems: "center",
+            padding: space.md,
+
+
+            borderCurve: "continuous",
+             borderRadius: 24, borderWidth: 0, marginBottom: 12, overflow: "visible", paddingHorizontal: 12},
+        swipeEventRow: { marginBottom: 0, minHeight: 72  , boxShadow: "none"},
+        eventWhen: {
+            width: 76,
+            alignSelf: "stretch",
+            justifyContent: "center",
+            paddingRight: space.sm,
+            borderRightWidth: 1,
+            borderRightColor: colors.hairline,
+            marginRight: space.md,
+        },
+        eventWhenText: { ...type.caption, fontWeight: "700", fontVariant: ["tabular-nums"] },
+        eventComplete: { marginLeft: space.sm, flexShrink: 0 },
+        checkButton: { width: MIN_TOUCH, height: MIN_TOUCH, marginLeft: space.xs, alignItems: "center", justifyContent: "center", flexShrink: 0 },
+        eventTitle: { ...type.label, color: colors.text },
+        eventSubtitle: { ...type.caption, color: colors.textMuted, marginTop: 2 },
+        modalBg: {
+            flex: 1,
+            backgroundColor: "rgba(28,25,23,0.55)",
+            justifyContent: "center",
+            alignItems: "center",
+            padding: space.xl,
+        },
+
+        modalSubtitle: { fontSize: type.caption.fontSize, fontWeight: "700", color: colors.textMuted, marginBottom: space.md },
+        modalNotes: { fontSize: 13, color: colors.textSecondary, lineHeight: 18, marginBottom: space.sm },
+        deleteConfirmText: { ...type.body, color: colors.textSecondary, marginTop: space.sm },
+        modalCloseBtn: {
+            height: 44,
+            borderRadius: radius.md,
+            borderCurve: "continuous",
+            backgroundColor: colors.accentStrong,
+            alignItems: "center",
+            justifyContent: "center",
+            marginTop: space.sm,
+        },
+        modalCloseText: { color: colors.onAccent, fontWeight: "800", fontSize: 13 },
+        formLabel: {
+            fontSize: type.caption.fontSize,
+            fontWeight: "700",
+            color: colors.textMuted,
+            textTransform: "uppercase",
+            marginBottom: 4,
+            marginTop: space.sm,
+        },
+        formInput: {
+            backgroundColor: colors.surfaceAlt,
+            borderWidth: 0,
+            borderColor: colors.border,
+            borderRadius: radius.lg,
+            borderCurve: "continuous",
+            paddingHorizontal: space.md,
+            height: 44,
+            fontSize: 16,
+            color: colors.text,
+        },
+        leadRow: { flexDirection: "row", flexWrap: "wrap", gap: space.xs, marginTop: 2 },
+        leadOption: {
+            minHeight: MIN_TOUCH,
+            justifyContent: "center",
+            paddingVertical: 8,
+            paddingHorizontal: space.md,
+            borderRadius: radius.pill,
+            borderWidth: 1,
+            borderColor: colors.border,
+            backgroundColor: colors.surface,
+        },
+        leadOptionActive: { borderColor: colors.primary, backgroundColor: colors.softGreen },
+        leadOptionText: { fontSize: type.caption.fontSize, fontWeight: "700", color: colors.textMuted },
+        leadOptionTextActive: { color: colors.primaryDark },
+
+        modalDeleteBtn: {
+            minWidth: 92,
+            minHeight: MIN_TOUCH,
+            paddingHorizontal: space.lg,
+            borderRadius: radius.pill,
+            borderCurve: "continuous",
+            backgroundColor: colors.danger,
+            alignItems: "center",
+            justifyContent: "center",
+        },
+        modalDeleteText: { ...type.label, color: colors.onAccent },
+    });
