@@ -1,4 +1,8 @@
-# BabyBook+ native migration
+# Babybookplus-mobile
+
+BabyBook+ React Native application.
+
+## BabyBook+ native migration
 
 The application lives independently in this project. React Native 0.88.1 / React 19.3.0 and the original native app identifier are retained. Expo SDK 58 supplies native modules and Metro bundling; Expo Go is not used. `src` contains the original UI, custom navigation, assets, business logic and focused checks. Do not edit the reference `../front-end` as part of this migration.
 
