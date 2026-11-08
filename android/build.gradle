@@ -19,3 +19,13 @@ buildscript {
 }
 
 apply plugin: "com.facebook.react.rootproject"
+
+apply plugin: "expo-root-project"
+
+// Hash long C++ object paths to fit Windows' path limit in nested checkouts.
+subprojects {
+    plugins.withId("com.android.library") {
+        android.defaultConfig.externalNativeBuild.cmake.arguments "-DCMAKE_OBJECT_PATH_MAX=240"
+        android.externalNativeBuild.cmake.buildStagingDirectory = new File(rootProject.projectDir.parentFile, ".cache/cxx/" + project.name)
+    }
+}

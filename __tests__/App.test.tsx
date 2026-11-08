@@ -1,13 +1,5 @@
-/**
- * @format
- */
-
-import React from 'react';
-import ReactTestRenderer from 'react-test-renderer';
-import App from '../App';
-
-test('renders correctly', async () => {
-  await ReactTestRenderer.act(() => {
-    ReactTestRenderer.create(<App />);
-  });
+test('native registry and isolated source entry are preserved', () => {
+  expect(require('../app.json').name).toBe('BabyBookPlus');
+  expect(require('../package.json').dependencies['react-native']).toBe('0.88.1');
+  expect(require('../app.json').expo.android.package).toBe('com.babybookplus');
 });

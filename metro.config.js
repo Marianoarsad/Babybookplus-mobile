@@ -1,11 +1,9 @@
-const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
-
-/**
- * Metro configuration
- * https://reactnative.dev/docs/metro
- *
- * @type {import('@react-native/metro-config').MetroConfig}
- */
-const config = {};
-
-module.exports = mergeConfig(getDefaultConfig(__dirname), config);
+const { getDefaultConfig } = require('expo/metro-config');
+const config = getDefaultConfig(__dirname);
+// Native build and QA artifacts must not enter Metro's file crawl.
+const existing = config.resolver.blockList;
+config.resolver.blockList = [
+  ...(Array.isArray(existing) ? existing : [existing].filter(Boolean)),
+  /[/\\]\.cache[/\\]|[/\\]\.cxx[/\\]|[/\\]\.gradle[/\\]|[/\\]android[/\\](?:app[/\\])?build[/\\]/,
+];
+module.exports = config;

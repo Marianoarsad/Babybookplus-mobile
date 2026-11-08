@@ -1,0 +1,20 @@
+{
+  "cli": {
+    "appVersionSource": "local"
+  },
+  "build": {
+    "preview": {
+      "distribution": "internal",
+      "environment": "preview",
+      "env": {
+        "EXPO_PUBLIC_API_BASE_URL": "https://babybook-xi2w.onrender.com",
+        "EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID": "153109903073-p7nam8j0rjair17u5k1rcsun6eri0ch4.apps.googleusercontent.com"
+      },
+      "android": {
+        "buildType": "apk",
+        "withoutCredentials": true,
+        "image": "latest"
+      }
+    }
+  }
+}

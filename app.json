@@ -1,4 +1,55 @@
 {
+  "expo": {
+    "name": "BabyBook+",
+    "slug": "babybook-plus",
+    "owner": "marianoarzad",
+    "extra": {
+      "eas": {
+        "projectId": "1e9ae745-f67e-49ad-97ec-48901d82cf6b"
+      }
+    },
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "scheme": "babybookplus-native",
+    "icon": "./src/assets/icon.png",
+    "android": {
+      "package": "com.babybookplus",
+      "adaptiveIcon": {
+        "backgroundColor": "#287BFA",
+        "foregroundImage": "./src/assets/adaptive-icon.png",
+        "monochromeImage": "./src/assets/monochrome-icon.png"
+      },
+      "permissions": [
+        "android.permission.CAMERA"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./src/assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-dev-client",
+        {
+          "addGeneratedScheme": false
+        }
+      ],
+      "expo-asset",
+      "expo-font",
+      "expo-secure-store",
+      "expo-sharing",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#287BFA",
+          "image": "./src/assets/splash-icon.png",
+          "imageWidth": 200
+        }
+      ]
+    ]
+  },
   "name": "BabyBookPlus",
-  "displayName": "BabyBookPlus"
+  "displayName": "BabyBook+"
 }

@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application>
+    <meta-data android:name="DEV_CLIENT_DEFAULT_LAUNCHER_URL" android:value="http://127.0.0.1:8083" />
+  </application>
+</manifest>

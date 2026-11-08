@@ -73,3 +73,11 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Private local configuration and migration verification artifacts
+.env
+.env.*
+!.env.example
+.cache/
+.expo/
+dist/

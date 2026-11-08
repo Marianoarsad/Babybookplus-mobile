@@ -1,0 +1,30 @@
+import React from 'react';
+import renderer, {act} from 'react-test-renderer';
+import {AppState} from 'react-native';
+import store from '../src/utils/recordStore.cjs';
+import {useScreenRefresh} from '../src/utils/useRecords';
+jest.mock('../src/utils/api', () => ({api:{}}));
+jest.mock('react-native', () => ({AppState:{currentState:'active',addEventListener:jest.fn()}}));
+test('mount permits freshness; manual and foreground refresh invalidate; unmount removes listener', async () => {
+  AppState.currentState = null;
+  let state, listener;
+  const remove = jest.fn();
+  AppState.addEventListener.mockImplementation((_, fn) => { listener=fn; return {remove}; });
+  const invalidate = jest.spyOn(store,'invalidateReads');
+  const load = jest.fn(async () => []);
+  function Probe(){state=useScreenRefresh('test-child',load);return null;}
+  let tree;
+  await act(async () => {tree=renderer.create(<Probe/>);});
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(invalidate).not.toHaveBeenCalled();
+  await act(async () => {listener("active");});
+  expect(load).toHaveBeenCalledTimes(1);
+  await act(async () => {await state.refresh();});
+  expect(invalidate).toHaveBeenLastCalledWith('test-child');
+  await act(async () => {listener('background');listener('active');});
+  expect(load).toHaveBeenCalledTimes(3);
+  expect(invalidate).toHaveBeenCalledTimes(2);
+  act(() => tree.unmount());
+  expect(remove).toHaveBeenCalled();
+  invalidate.mockRestore();
+});

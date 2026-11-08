@@ -1,0 +1,22 @@
+# Upload only this app using EAS_NO_VCS=1 and EAS_PROJECT_ROOT=$PWD.
+node_modules/
+.git/
+.expo/
+.cache/
+dist/
+coverage/
+**/build/
+**/.gradle/
+**/.cxx/
+**/.kotlin/
+**/local.properties
+**/.env
+**/.env.*
+**/credentials.json
+**/*.jks
+**/*.keystore
+!android/app/debug.keystore
+**/*.log
+**/.DS_Store
+ios/Pods/
+ios/build/
